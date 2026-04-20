@@ -1,0 +1,113 @@
+# =============================================================================
+# osb_export_playbook.yml
+# Ansible playbook to export all OSB projects into a single JAR backup file.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini osb_export_playbook.yml
+# =============================================================================
+---
+- name: Export All Oracle Service Bus Projects to JAR
+  hosts: osb_server
+  become: yes
+  become_user: oracle
+
+  vars:
+    # ------------------------------------------------------------------
+    # OSB CONNECTION SETTINGS — edit these to match your environment
+    # ------------------------------------------------------------------
+    osb_admin_host: "osb-server.example.com"      # WebLogic Admin Server host (can be localhost if running on same machine)
+    osb_admin_port: "7001"                         # WebLogic Admin Server port
+    osb_protocol: "t3"                             # Use "t3s" for SSL connections
+    osb_username: "osb_shared_user"                # Shared/common OSB account
+    osb_password: "YourPasswordHere"               # Password for the shared account
+
+    # ------------------------------------------------------------------
+    # ORACLE MIDDLEWARE PATHS — edit to match your Oracle installation
+    # ------------------------------------------------------------------
+    oracle_home: "/u01/app/oracle/middleware"       # Oracle Middleware Home (FMW_HOME)
+    wlst_sh: "{{ oracle_home }}/oracle_common/common/bin/wlst.sh"
+
+    # ------------------------------------------------------------------
+    # EXPORT SETTINGS
+    # ------------------------------------------------------------------
+    export_dir: "/opt/osb_backups"                  # Where the JAR will be saved
+    wlst_script_remote: "/tmp/osb_export_all.py"   # Temp location for the WLST script
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 1. Ensure the backup output directory exists
+    # ------------------------------------------------------------------
+    - name: Create export directory
+      ansible.builtin.file:
+        path: "{{ export_dir }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: "0755"
+
+    # ------------------------------------------------------------------
+    # 2. Copy the WLST export script to the OSB server
+    # ------------------------------------------------------------------
+    - name: Copy WLST export script to remote server
+      ansible.builtin.copy:
+        src: scripts/osb_export_all.py
+        dest: "{{ wlst_script_remote }}"
+        owner: oracle
+        group: oinstall
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 3. Execute the WLST export script
+    #    - Sources the Oracle environment before running
+    #    - Passes config via environment variables so the .py defaults
+    #      are overridden by the Ansible vars above
+    # ------------------------------------------------------------------
+    - name: Run WLST export script
+      ansible.builtin.shell: |
+        export ORACLE_HOME="{{ oracle_home }}"
+        export OSB_ADMIN_HOST="{{ osb_admin_host }}"
+        export OSB_ADMIN_PORT="{{ osb_admin_port }}"
+        export OSB_PROTOCOL="{{ osb_protocol }}"
+        export OSB_USERNAME="{{ osb_username }}"
+        export OSB_PASSWORD="{{ osb_password }}"
+        export OSB_EXPORT_DIR="{{ export_dir }}"
+        "{{ wlst_sh }}" "{{ wlst_script_remote }}"
+      args:
+        executable: /bin/bash
+      register: wlst_output
+      changed_when: "'EXPORT COMPLETE' in wlst_output.stdout"
+      failed_when: wlst_output.rc != 0
+
+    # ------------------------------------------------------------------
+    # 4. Display the WLST output for verification
+    # ------------------------------------------------------------------
+    - name: Show WLST export output
+      ansible.builtin.debug:
+        var: wlst_output.stdout_lines
+
+    # ------------------------------------------------------------------
+    # 5. Find the exported JAR file and show details
+    # ------------------------------------------------------------------
+    - name: Find exported JAR file
+      ansible.builtin.find:
+        paths: "{{ export_dir }}"
+        patterns: "osb_all_projects_*.jar"
+        age: "-1m"
+      register: jar_files
+
+    - name: Show exported JAR details
+      ansible.builtin.debug:
+        msg: >-
+          Export successful!
+          File: {{ item.path }}
+          Size: {{ (item.size / 1024 / 1024) | round(2) }} MB
+          Time: {{ item.mtime | int | string }}
+      loop: "{{ jar_files.files }}"
+
+    # ------------------------------------------------------------------
+    # 6. Cleanup — remove the temporary WLST script
+    # ------------------------------------------------------------------
+    - name: Remove temporary WLST script
+      ansible.builtin.file:
+        path: "{{ wlst_script_remote }}"
+        state: absent
