@@ -1,0 +1,30 @@
+---
+- name: Export all OSB projects using WLST
+  hosts: osb_server
+  gather_facts: no
+  become: yes
+  become_user: oracle
+
+  tasks:
+
+    - name: Ensure backup directory exists
+      file:
+        path: /u01/osb_backup
+        state: directory
+        mode: '0755'
+
+    - name: Copy WLST export script
+      copy:
+        src: export_osb_projects.py
+        dest: /u01/osb_backup/export_osb_projects.py
+        mode: '0755'
+
+    - name: Run WLST OSB export
+      shell: |
+        /u01/oracle/Middleware/oracle_common/common/bin/wlst.sh \
+        /u01/osb_backup/export_osb_projects.py
+      register: wlst_output
+
+    - name: Show WLST output
+      debug:
+        var: wlst_output.stdout
