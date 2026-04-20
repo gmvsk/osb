@@ -1,0 +1,4 @@
+[osb_server]
+osb-hostname ansible_user=your_ssh_user
+
+#ansible-playbook -i hosts.ini osb_export.yml
