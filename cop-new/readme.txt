@@ -18,6 +18,9 @@ Replace your-osb-hostname-or-ip with the OSB server's hostname/IP and your_ssh_u
 How to Run
 Step 1 — On your Ubuntu/Ansible control machine, create a working directory and place both files:
 
+mkdir ~/osb-export && cd ~/osb-export
+# create inventory.ini and osb_export_playbook.yml with the contents above
+
 Step 2 — Edit the playbook vars: section with your real values:
 
 Variable	What to set
