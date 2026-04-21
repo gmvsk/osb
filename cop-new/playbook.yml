@@ -1,0 +1,159 @@
+---
+# osb_export_playbook.yml
+#
+# Exports ALL Oracle Service Bus projects into a single JAR backup file.
+# This is a READ-ONLY operation — nothing is modified on the OSB server.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini osb_export_playbook.yml
+
+- name: Export all OSB projects as JAR backup
+  hosts: osb_server
+  become: yes
+  become_user: oracle
+  gather_facts: no
+
+  vars:
+    # =======================================================================
+    # UPDATE THESE VALUES FOR YOUR ENVIRONMENT
+    # =======================================================================
+    oracle_home: "/u01/app/oracle/middleware"        # Oracle/Fusion Middleware home
+    admin_url: "t3://localhost:7001"                  # WebLogic Admin Server URL
+    osb_username: "weblogic"                          # Shared OSB service account
+    osb_password: "YourSharedPasswordHere"            # Password for the shared account
+    backup_dir: "/opt/osb_backups"                    # Where the JAR will be saved
+    # =======================================================================
+    # Derived paths — typically no changes needed
+    # =======================================================================
+    wlst_sh: "{{ oracle_home }}/oracle_common/common/bin/wlst.sh"
+    wlst_script: "/tmp/osb_export_all_projects.py"
+
+  tasks:
+
+    # -- 1. Ensure the backup directory exists --------------------------------
+    - name: Create backup directory if it does not exist
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0755"
+
+    # -- 2. Deploy the WLST export script (temp file) ------------------------
+    - name: Deploy WLST export script
+      ansible.builtin.copy:
+        dest: "{{ wlst_script }}"
+        mode: "0644"
+        content: |
+          """
+          WLST script — exports ALL OSB projects to a JAR file.
+          READ-ONLY: does not create sessions or modify any configuration.
+          """
+          from com.bea.wli.sb.management.configuration import ALSBConfigurationMBean
+          from com.bea.wli.config import Ref
+          from java.io import FileOutputStream
+          import time, sys
+
+          ADMIN_URL  = '{{ admin_url }}'
+          USERNAME   = '{{ osb_username }}'
+          PASSWORD   = '{{ osb_password }}'
+          BACKUP_DIR = '{{ backup_dir }}'
+
+          timestamp   = time.strftime('%Y%m%d_%H%M%S')
+          export_file = BACKUP_DIR + '/osb_backup_all_projects_' + timestamp + '.jar'
+
+          print '=' * 60
+          print 'OSB Full Export — Starting'
+          print '=' * 60
+          print 'Admin URL  : ' + ADMIN_URL
+          print 'Username   : ' + USERNAME
+          print 'Export File : ' + export_file
+          print '=' * 60
+
+          try:
+              # Connect to the running Admin Server (read-only)
+              print '\n[1/5] Connecting to Admin Server ...'
+              connect(USERNAME, PASSWORD, ADMIN_URL)
+              print '[1/5] Connected.'
+
+              # Switch to domain-runtime MBean tree
+              print '[2/5] Switching to domain runtime ...'
+              domainRuntime()
+
+              # Locate the Service Bus configuration MBean
+              print '[3/5] Locating ALSBConfigurationMBean ...'
+              alsbMBean = findService(ALSBConfigurationMBean.NAME,
+                                      ALSBConfigurationMBean.TYPE)
+              if alsbMBean is None:
+                  print 'ERROR: ALSBConfigurationMBean not found. Is OSB deployed?'
+                  sys.exit(1)
+
+              # Gather every resource reference in the domain
+              print '[4/5] Retrieving all project resources ...'
+              allRefs = alsbMBean.getRefs(Ref.DOMAIN)
+              print '       Found ' + str(allRefs.size()) + ' resources.'
+
+              if allRefs.size() == 0:
+                  print 'WARNING: Nothing to export.'
+                  disconnect()
+                  exit()
+
+              # Export (read-only — returns a byte[] JAR)
+              print '[5/5] Exporting to JAR ...'
+              jarBytes = alsbMBean.export(allRefs, True, None)
+              print '       Generated ' + str(len(jarBytes)) + ' bytes.'
+
+              # Write to disk
+              fos = FileOutputStream(export_file)
+              fos.write(jarBytes)
+              fos.close()
+
+              print '\n' + '=' * 60
+              print 'SUCCESS'
+              print 'File : ' + export_file
+              print 'Size : ' + str(len(jarBytes)) + ' bytes'
+              print '=' * 60
+
+          except Exception, e:
+              print '\nERROR: ' + str(e)
+              raise e
+
+          finally:
+              try:
+                  disconnect()
+              except:
+                  pass
+              exit()
+
+    # -- 3. Execute the WLST script ------------------------------------------
+    - name: Run WLST export script
+      ansible.builtin.shell: |
+        {{ wlst_sh }} {{ wlst_script }}
+      register: wlst_result
+      changed_when: false          # read-only operation, nothing is changed
+
+    # -- 4. Show the script output --------------------------------------------
+    - name: Display WLST output
+      ansible.builtin.debug:
+        var: wlst_result.stdout_lines
+
+    # -- 5. Verify the backup file was created --------------------------------
+    - name: Find exported JAR files
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        patterns: "osb_backup_all_projects_*.jar"
+      register: jar_files
+
+    - name: Show backup file details
+      ansible.builtin.debug:
+        msg: "Backup: {{ item.path }}  ({{ item.size }} bytes)"
+      loop: "{{ jar_files.files }}"
+
+    - name: Fail if no backup was created
+      ansible.builtin.fail:
+        msg: "Export failed — no JAR file found in {{ backup_dir }}"
+      when: jar_files.matched == 0
+
+    # -- 6. Clean up temp script ----------------------------------------------
+    - name: Remove temporary WLST script
+      ansible.builtin.file:
+        path: "{{ wlst_script }}"
+        state: absent
